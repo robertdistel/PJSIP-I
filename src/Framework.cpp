@@ -829,7 +829,7 @@ int main(int argc, char** argv)
 		ua_cfg.cb.on_call_sdp_created=&on_call_sdp_created;
 
 		ua_cfg.max_calls = 1200;
-		ua_cfg.thread_cnt=4;
+		ua_cfg.thread_cnt=8;
 
 		log_cfg.console_level = 3;
 
