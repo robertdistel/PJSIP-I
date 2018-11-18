@@ -828,13 +828,13 @@ int main(int argc, char** argv)
 		ua_cfg.cb.on_create_media_transport=&on_create_media_transport;
 		ua_cfg.cb.on_call_sdp_created=&on_call_sdp_created;
 
-		ua_cfg.max_calls = 100;
-		ua_cfg.thread_cnt=2;
+		ua_cfg.max_calls = 1200;
+		ua_cfg.thread_cnt=4;
 
-		log_cfg.console_level = 4;
+		log_cfg.console_level = 3;
 
 		media_cfg.no_vad = 1; //disable VAD
-		media_cfg.thread_cnt=4;
+		media_cfg.thread_cnt=8;
 
 		pjsua_init(&ua_cfg, &log_cfg, &media_cfg);
 	}
@@ -888,7 +888,7 @@ int main(int argc, char** argv)
 
 
 
-		for (int i=0; i<1; i++)
+		for (int i=0; i<550; i++)
 		{
 
 			pjsua_msg_data msg_data;
@@ -899,8 +899,8 @@ int main(int argc, char** argv)
 			pj_str_t uri = pj_str((char *)uri_to_call_string.c_str());
 			callUserData->callType=eCallType::SIMULATED_AXE_CALL_OFFER;
 			pjsua_call_make_call(acc_id, &uri, 0, callUserData, &msg_data, &(callUserData->call_id));
-			callUserData->SetHangupTimer(30);
-			usleep(500000);
+			callUserData->SetHangupTimer(120);
+			usleep(100000);
 		}
 
 	}
