@@ -478,6 +478,11 @@ public:
 	void SetHangupTimer(uint32_t sec_timeout)
 	{
 		pjsua_call_id c = call_id; //capture c by value
+		if(c==-1)
+		{
+			std::cerr << "WTF - trying to set timer on call object that is not initialised";
+			exit(-1);
+		}
 		std::function<void(void)>* lambda = new std::function<void(void)>([c](void)
 		{
 			if (c !=-1)
@@ -875,7 +880,7 @@ int main(int argc, char** argv)
 	{
 
 
-		for (int i=0; i<30; i++)
+		for (int i=0; i<20; i++)
 		{
 
 			pjsua_msg_data msg_data;
@@ -890,9 +895,15 @@ int main(int argc, char** argv)
 			usleep(500000);
 		}
 
+		sleep(30);
+		pjsua_call_hangup_all();
+
+		return 0;
+
 	}
 
 	/* Wait until user press "q" to quit. */
+
 	for (;;) {
 		char option[10];
 
