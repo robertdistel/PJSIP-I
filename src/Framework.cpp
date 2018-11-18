@@ -136,7 +136,7 @@ PJ_DEF(pj_status_t) pjmedia_tp_adapter_create( pjmedia_endpt *endpt,
 	pj_ansi_strncpy(adapter->base.name, pool->obj_name,
 			sizeof(adapter->base.name));
 	adapter->base.type = (pjmedia_transport_type)
-											 (PJMEDIA_TRANSPORT_TYPE_USER + 1);
+																					 (PJMEDIA_TRANSPORT_TYPE_USER + 1);
 	adapter->base.op = &tp_adapter_op;
 
 	/* Save the transport as the slave transport */
@@ -479,10 +479,10 @@ public:
 	{
 		pjsua_call_id c = call_id; //capture c by value
 		std::function<void(void)>* lambda = new std::function<void(void)>([c](void)
-		{
+				{
 			if (c !=-1)
 				pjsua_call_hangup(c,200,0,0);
-		});
+				});
 		clearCallTimerCB=std::shared_ptr<std::function<void(void)>>(lambda);
 		pjsua_schedule_timer2(timer_heap_callback,this,sec_timeout*1000);
 	}
@@ -762,12 +762,12 @@ int main(int argc, char** argv)
 
 	po::options_description desc;
 	desc.add_options()
-	    																												  ("help,h", "Help screen")
-																														  ("port,p",po::value(&port)->default_value(5060),"sip port to listen on")
-																														  //																						  ("transport,t",po::value(&transport_string),"transport to use, tcp/udp")
-																														  ("server", "activate server thread")
-																														  ("client", po::value(&uri_to_call_string)->default_value(std::string("sip:127.0.0.1")),"activate client thread")
-																														  ;
+	    																																						  ("help,h", "Help screen")
+																																								  ("port,p",po::value(&port)->default_value(5060),"sip port to listen on")
+																																								  //																						  ("transport,t",po::value(&transport_string),"transport to use, tcp/udp")
+																																								  ("server", "activate server thread")
+																																								  ("client", po::value(&uri_to_call_string)->default_value(std::string("sip:127.0.0.1")),"activate client thread")
+																																								  ;
 
 
 	po::variables_map vm;
@@ -828,13 +828,13 @@ int main(int argc, char** argv)
 		ua_cfg.cb.on_create_media_transport=&on_create_media_transport;
 		ua_cfg.cb.on_call_sdp_created=&on_call_sdp_created;
 
-		ua_cfg.max_calls = 1200;
-		ua_cfg.thread_cnt=8;
+		ua_cfg.max_calls = 100;
+		ua_cfg.thread_cnt=2;
 
-		log_cfg.console_level = 3;
+		log_cfg.console_level = 4;
 
 		media_cfg.no_vad = 1; //disable VAD
-		media_cfg.thread_cnt=16;
+		media_cfg.thread_cnt=4;
 
 		pjsua_init(&ua_cfg, &log_cfg, &media_cfg);
 	}
@@ -873,9 +873,22 @@ int main(int argc, char** argv)
 
 	if (vm.count("server")==0)
 	{
+		//this is bullshit - what we want to do is force the use of A law for testing - lots of bandwidth but only small CPU load
+		pjmedia_codec_info* inf;
+
+		//first find the codec manager singleton
+		pjmedia_codec_mgr* codec_mgr = pjmedia_endpt_get_codec_mgr(pjsua_get_pjmedia_endpt());
+
+		//the only way to set codec priority is by identifying it by name (actually a PJ_STR)
+		//but we cant it directly - first get codec info using the static enum that actually defines the codec
+		pjmedia_codec_mgr_get_codec_info(codec_mgr,  (unsigned int)PJMEDIA_RTP_PT_PCMA , (const pjmedia_codec_info**)&inf);
+
+		//and then use the name to look up the info again and set priority
+		pjmedia_codec_mgr_set_codec_priority(codec_mgr,&(inf->encoding_name), PJMEDIA_CODEC_PRIO_HIGHEST);
 
 
-		for (int i=0; i<30; i++)
+
+		for (int i=0; i<1; i++)
 		{
 
 			pjsua_msg_data msg_data;
@@ -907,6 +920,74 @@ int main(int argc, char** argv)
 
 		if (option[0] == 'h')
 			pjsua_call_hangup_all();
+
+		if (option[0] == 'l')
+		{
+			auto call_count = pjsua_call_get_count()+10; //reserve a little extra space, can 10 calls turn up in the meantime....
+			if (call_count>0)
+			{
+				std::vector<pjsua_call_id> calls(call_count);
+				pjsua_enum_calls(calls.data(),&call_count); //may update call count on another thread - we send in the max size and get back the real number
+				calls.resize(call_count);
+				for (auto call: calls)
+				{
+					pjsua_call_info info;
+					if(pjsua_call_get_info(call,&info) == PJ_SUCCESS) //get info on the call - but it may disappear while iterating - so not finding it is not an error
+					{
+
+						printf("ID: %d\nFrom: %.*s To: %.*s\nCallID: %.*s\nState: %.*s\nConnect Duration: %ld.%03lds Total Duration %ld.%03lds\n",
+								call,
+								(int)info.local_contact.slen,
+								info.local_contact.ptr,
+								(int)info.remote_contact.slen,
+								info.remote_contact.ptr,
+								(int)info.call_id.slen,
+								info.call_id.ptr,
+								(int)info.state_text.slen,
+								info.state_text.ptr,
+								info.connect_duration.sec,
+								info.connect_duration.msec,
+								info.total_duration.sec,
+								info.total_duration.msec);
+
+
+						PJSUA_LOCK();
+
+						pjsua_call* pcall = &pjsua_var.calls[call];
+
+						if (pcall) //was it still there??
+						{
+
+
+							pjsua_call_media* call_med = &pcall->media[0];  //this breaks when there are multiple media types...
+							pjmedia_rtcp_stat rtcp_stats;
+							pjmedia_stream_get_stat(call_med->strm.a.stream,&rtcp_stats);
+							PJSUA_UNLOCK();
+							printf ("rx stats\npkts: %d bytes: %d\ndiscarded: %d lost: %d\nreordered: %d dup: %d\njitter (us) min/mean/max %d/%d/%d\n",
+									rtcp_stats.rx.pkt,
+									rtcp_stats.rx.bytes,
+									rtcp_stats.rx.discard,
+									rtcp_stats.rx.loss,
+									rtcp_stats.rx.reorder,
+									rtcp_stats.rx.dup,
+									rtcp_stats.rx.jitter.min,
+									rtcp_stats.rx.jitter.mean,
+									rtcp_stats.rx.jitter.max);
+
+
+						}
+						else
+						{
+							PJSUA_UNLOCK();
+						}
+
+
+
+					}
+
+				}
+			}
+		}
 	}
 
 	return 0;
