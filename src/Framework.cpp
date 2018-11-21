@@ -136,7 +136,7 @@ PJ_DEF(pj_status_t) pjmedia_tp_adapter_create( pjmedia_endpt *endpt,
 	pj_ansi_strncpy(adapter->base.name, pool->obj_name,
 			sizeof(adapter->base.name));
 	adapter->base.type = (pjmedia_transport_type)
-											 (PJMEDIA_TRANSPORT_TYPE_USER + 1);
+																									 (PJMEDIA_TRANSPORT_TYPE_USER + 1);
 	adapter->base.op = &tp_adapter_op;
 
 	/* Save the transport as the slave transport */
@@ -442,13 +442,14 @@ public:
 	eSimulatorDirectionType simDir;
 	eAgentDirectionType agentDir;
 	pjsua_call_id call_id;
+	std::vector<char> sdp_buf;
 
 	std::shared_ptr<std::function<void(void)>> clearCallTimerCB;
 
 
 	LocalCallUserData():callType(eCallType::UNINITIALISED),
 			simDir(eSimulatorDirectionType::SIMULATED_UNI_DIRECTIONAL),
-			agentDir(eAgentDirectionType::ANSWER_UNI_DIRECTIONAL),call_id(-1)
+			agentDir(eAgentDirectionType::ANSWER_UNI_DIRECTIONAL),call_id(-1),sdp_buf(2000,0)
 	{
 		pool = pjmedia_endpt_create_pool(pjsua_get_pjmedia_endpt(), "USER_CALL_%p", 512, 512);
 	}
@@ -469,6 +470,33 @@ public:
 		pjsua_call_set_user_data (call_id,this);
 	}
 
+	void SaveSDP()
+	{
+		if(call_id==-1)
+		{
+			std::cerr << "WTF - trying to save sdp in unbound call context";
+			exit(-1);
+		}
+
+		PJSUA_LOCK();
+
+		auto call = &pjsua_var.calls[call_id];
+		pjmedia_sdp_neg* sdp_neg = call->inv->neg;
+
+		PJSUA_UNLOCK();
+
+		pjmedia_sdp_session* sdp;
+
+		pjmedia_sdp_neg_get_active_local(sdp_neg,(const pjmedia_sdp_session** )&sdp);
+
+		int sz;
+		while((sz = pjmedia_sdp_print (sdp, sdp_buf.data(), sdp_buf.size()))==-1)
+		{
+			sdp_buf.resize(sdp_buf.size() * 2);
+		}
+		sdp_buf.resize(sz+1);
+	}
+
 	static void timer_heap_callback(void *user_data)
 	{
 		LocalCallUserData* callUserData = (LocalCallUserData*)user_data;
@@ -484,10 +512,10 @@ public:
 			exit(-1);
 		}
 		std::function<void(void)>* lambda = new std::function<void(void)>([c](void)
-		{
+				{
 			if (c !=-1)
 				pjsua_call_hangup(c,200,0,0);
-		});
+				});
 		clearCallTimerCB=std::shared_ptr<std::function<void(void)>>(lambda);
 		pjsua_schedule_timer2(timer_heap_callback,this,sec_timeout*1000);
 	}
@@ -495,12 +523,112 @@ public:
 
 };
 
+
+//replace this with generating a legitimate ISUP IAM in the content_string - treat it as a bucket of bytes - NOT NULL TERMINATED STRING
 void add_SIP_I_AXE_IAM_Mime(pj_pool_t* pool, pjsua_msg_data *msg_data)
 {
 	pjsip_multipart_part *alt_part;
 	const char* content_type_string = "application";
 	const char* content_subtype_string = "ISUP; version=itu-t \nContent-Disposition: signal; handling=optional";
-	const char* content_string = "THIS WAS AN AXE IAM A bunch of zeros \0\0\0\0 And after the zeros - ";
+
+	/*this is an IAM string extracted from PCAP trace
+	ISDN User Part
+	    Message Type: Initial address (1)
+	    Nature of Connection Indicators : 0x0
+	        Mandatory Parameter: Nature of connection indicators (6)
+	        .... ..00 = Satellite Indicator: No Satellite circuit in connection (0x0)
+	        .... 00.. = Continuity Check Indicator: Continuity check not required (0x0)
+	        ...0 .... = Echo Control Device Indicator: Echo control device not included
+	    Forward Call Indicators : 0x2001
+	        Mandatory Parameter: Forward call indicators (7)
+	        .... ...0 .... .... = National/international call indicator: Call to be treated as national call
+	        .... .00. .... .... = End-to-end method indicator: No End-to-end method available (only link-by-link method available) (0x0)
+	        .... 0... .... .... = Interworking indicator: no interworking encountered (No.7 signalling all the way)
+	        ...0 .... .... .... = End-to-end information indicator: no end-to-end information available
+	        ..1. .... .... .... = ISDN user part indicator: ISDN user part used all the way
+	        00.. .... .... .... = ISDN user part preference indicator: ISDN user part preferred all the way (0x0)
+	        .... .... .... ...1 = ISDN access indicator: originating access ISDN
+	        .... .... .... .00. = SCCP method indicator: No indication (0x0)
+	        .... .... ...0 .... = Ported number translation indicator: number not translated
+	        .... .... ..0. .... = Query on Release attempt indicator: no QoR routing attempt in progress
+	    Calling Party's category : 0xf7 (reserved/spare)
+	        Mandatory Parameter: Calling party's category (9)
+	        Calling Party's category: Unknown (0xf7)
+	    Transmission medium requirement : 0 (speech)
+	        Mandatory Parameter: Transmission medium requirement (2)
+	        Transmission medium requirement: speech (0)
+	    Called Party NumberCalled Party Number: 0396504232F
+	        Mandatory Parameter: Called party number (4)
+	        Pointer to Parameter: 2
+	        Parameter Length: 8
+	        1... .... = Odd/even indicator: odd number of address signals
+	        .000 0010 = Nature of address indicator: unknown (national use) (2)
+	        1... .... = INN indicator: routing to internal network number not allowed
+	        .001 .... = Numbering plan indicator: ISDN (Telephony) numbering plan (1)
+	        Called Party Number: 0396504232F
+	            .... 0000 = Address signal digit: 0 (0)
+	            0011 .... = Address signal digit: 3 (3)
+	            .... 1001 = Address signal digit: 9 (9)
+	            0110 .... = Address signal digit: 6 (6)
+	            .... 0101 = Address signal digit: 5 (5)
+	            0000 .... = Address signal digit: 0 (0)
+	            .... 0100 = Address signal digit: 4 (4)
+	            0010 .... = Address signal digit: 2 (2)
+	            .... 0011 = Address signal digit: 3 (3)
+	            0010 .... = Address signal digit: 2 (2)
+	            .... 1111 = Address signal digit: Stop sending (15)
+	            E.164 Called party number digits: 0396504232F
+	    Pointer to start of optional part: 10
+	    Parameter: (t=10, l=7) Calling party number: Calling party numberCalling Party Number: 418702172
+	        Optional Parameter: Calling party number (10)
+	        Parameter Length: 7
+	        1... .... = Odd/even indicator: odd number of address signals
+	        .000 0011 = Nature of address indicator: national (significant) number (3)
+	        0... .... = NI indicator: complete
+	        .001 .... = Numbering plan indicator: ISDN (Telephony) numbering plan (1)
+	        .... 00.. = Address presentation restricted indicator: presentation allowed (0)
+	        .... ..11 = Screening indicator: network provided (3)
+	        Calling Party Number: 418702172
+	            .... 0100 = Address signal digit: 4 (4)
+	            0001 .... = Address signal digit: 1 (1)
+	            .... 1000 = Address signal digit: 8 (8)
+	            0111 .... = Address signal digit: 7 (7)
+	            .... 0000 = Address signal digit: 0 (0)
+	            0010 .... = Address signal digit: 2 (2)
+	            .... 0001 = Address signal digit: 1 (1)
+	            0111 .... = Address signal digit: 7 (7)
+	            .... 0010 = Address signal digit: 2 (2)
+	            E.164 Calling party number digits: 418702172
+	    Parameter: (t=3, l=37) Access transport: Access transport
+	        Optional Parameter: Access transport (3)
+	        Parameter Length: 37
+	        Access transport parameter field (-> Q.931): 710ca01100f1400000f1400000f06d15a020003101001081...
+	        Called party subaddress
+	            Information element: Called party subaddress
+	            Length: 12
+	            .010 .... = Type of subaddress: Unknown (0x2)
+	            .... 0... = Odd/even indicator: Even number of address signals (0x0)
+	            Subaddress: 1100f1400000f1400000f0
+	        Calling party subaddress
+	            Information element: Calling party subaddress
+	            Length: 21
+	            .010 .... = Type of subaddress: Unknown (0x2)
+	            .... 0... = Odd/even indicator: Even number of address signals (0x0)
+	            Subaddress: 200031010010818080010001f2f1ff0080ffff11
+	    End of optional parameters (0)
+*/
+	const uint8_t content_string[] = {
+			0x01,0x00,0x20,0x01,0xf7,0x00,0x02,0x0a,
+			0x08,0x82,0x90,0x30,0x69,0x05,0x24,0x23,
+			0x0f,0x0a,0x07,0x83,0x13,0x14,0x78,0x20,
+			0x71,0x02,0x03,0x25,0x71,0x0c,0xa0,0x11,
+			0x00,0xf1,0x40,0x00,0x00,0xf1,0x40,0x00,
+			0x00,0xf0,0x6d,0x15,0xa0,0x20,0x00,0x31,
+			0x01,0x00,0x10,0x81,0x80,0x80,0x01,0x00,
+			0x01,0xf2,0xf1,0xff,0x00,0x80,0xff,0xff,
+			0x11,0x00
+	};
+
 
 	const pj_str_t content_type=pj_str((char*)content_type_string);
 	const pj_str_t content_subtype=pj_str((char*)content_subtype_string);
@@ -522,7 +650,7 @@ void add_SIP_I_S12_IAM_Mime(pj_pool_t* pool, pjsua_msg_data *msg_data)
 	pjsip_multipart_part *alt_part;
 	const char* content_type_string = "application";
 	const char* content_subtype_string = "ISUP; version=itu-t \nContent-Disposition: signal; handling=optional";
-	const char* content_string = "THIS WAS AN S12 IAM A bunch of zeros \0\0\0\0 And after the zeros - ";
+	const char content_string[] = "THIS WAS AN S12 IAM A bunch of zeros \0\0\0\0 And after the zeros - ";
 
 	const pj_str_t content_type=pj_str((char*)content_type_string);
 	const pj_str_t content_subtype=pj_str((char*)content_subtype_string);
@@ -539,12 +667,15 @@ void add_SIP_I_S12_IAM_Mime(pj_pool_t* pool, pjsua_msg_data *msg_data)
 	pj_list_push_back(&msg_data->multipart_parts, alt_part);
 }
 
+
+//the CON ISUP message to append on the reply - its always the same
 void add_SIP_I_CON_Mime(pj_pool_t* pool, pjsua_msg_data *msg_data)
 {
 	pjsip_multipart_part *alt_part;
 	const char* content_type_string = "application";
 	const char* content_subtype_string = "ISUP; version=itu-t \nContent-Disposition: signal; handling=optional";
-	const char* content_string = "HIS WAS A CON A bunch of zeros \0\0\0\0 And after the zeros - T";
+	//CON + BACKWARD CALL INDICATOR BYTES
+	const char content_string[] = { 0x07, 0x06, 0x16 };
 
 	const pj_str_t content_type=pj_str((char*)content_type_string);
 	const pj_str_t content_subtype=pj_str((char*)content_subtype_string);
@@ -624,6 +755,9 @@ static void on_incoming_call(pjsua_acc_id acc_id, pjsua_call_id call_id,
 	pjsua_call_answer(call_id, 200, NULL, &msg_data);
 }
 
+static std::vector<uint64_t> statuscode_counter(1000,0);
+
+static int ctr(0);
 
 
 /* Callback called by the library when call's state has changed */
@@ -633,14 +767,22 @@ static void on_call_state(pjsua_call_id call_id, pjsip_event *e)
 
 	PJ_UNUSED_ARG(e);
 
+	pjsip_status_code sc;
+
 	pjsua_call_get_info(call_id, &ci);
 	PJ_LOG(3,(THIS_FILE, "Call %d state=%.*s", call_id,
 			(int)ci.state_text.slen,
 			ci.state_text.ptr));
 	switch (ci.state)
 	{
+	case PJSIP_INV_STATE_CONFIRMED :
+		LocalCallUserData::LookupByCall(call_id)->SaveSDP();
+		ctr++;
+		break;
 	case PJSIP_INV_STATE_DISCONNECTED :
+		statuscode_counter[ci.last_status]++;
 		delete LocalCallUserData::LookupByCall(call_id);
+		ctr--;
 		break;
 	default:
 		break;
@@ -673,16 +815,14 @@ static void on_call_media_state(pjsua_call_id call_id)
 		PJSUA_LOCK();
 
 		call = &pjsua_var.calls[call_id];
-
-
 		call_med = &call->media[med_idx];
 
 		pjmedia_stream_pause(call_med->strm.a.stream,PJMEDIA_DIR_DECODING);
 		//pjmedia_stream_pause(call_med->strm.a.stream,PJMEDIA_DIR_ENCODING_DECODING);
 
+
 		PJSUA_UNLOCK();
 
-		//pjsua_call_get_stream_info(call_id,0,&si);
 
 	}
 }
@@ -767,12 +907,11 @@ int main(int argc, char** argv)
 
 	po::options_description desc;
 	desc.add_options()
-	    																												  ("help,h", "Help screen")
-																														  ("port,p",po::value(&port)->default_value(5060),"sip port to listen on")
-																														  //																						  ("transport,t",po::value(&transport_string),"transport to use, tcp/udp")
-																														  ("server", "activate server thread")
-																														  ("client", po::value(&uri_to_call_string)->default_value(std::string("sip:127.0.0.1")),"activate client thread")
-																														  ;
+	    																																										  ("help,h", "Help screen")
+																																												  ("port,p",po::value(&port)->default_value(5060),"sip port to listen on")
+																																												  ("server", "activate server thread")
+																																												  ("client", po::value(&uri_to_call_string)->default_value(std::string("sip:127.0.0.1")),"activate client thread")
+																																												  ;
 
 
 	po::variables_map vm;
@@ -834,12 +973,15 @@ int main(int argc, char** argv)
 		ua_cfg.cb.on_call_sdp_created=&on_call_sdp_created;
 
 		ua_cfg.max_calls = 1200;
-		ua_cfg.thread_cnt=8;
+		ua_cfg.thread_cnt=2;
 
-		log_cfg.console_level = 3;
+		log_cfg.console_level = 2;
 
 		media_cfg.no_vad = 1; //disable VAD
-		media_cfg.thread_cnt=16;
+		if (vm.count("server")==0)
+			media_cfg.thread_cnt=2;
+		else
+			media_cfg.thread_cnt=16;
 
 		pjsua_init(&ua_cfg, &log_cfg, &media_cfg);
 	}
@@ -878,9 +1020,20 @@ int main(int argc, char** argv)
 
 	if (vm.count("server")==0)
 	{
+		//this is bullshit - what we want to do is force the use of A law for testing - lots of bandwidth but only small CPU load
+		pjmedia_codec_info* inf;
 
+		//first find the codec manager singleton
+		pjmedia_codec_mgr* codec_mgr = pjmedia_endpt_get_codec_mgr(pjsua_get_pjmedia_endpt());
 
-		for (int i=0; i<20; i++)
+		//the only way to set codec priority is by identifying it by name (actually a PJ_STR)
+		//but we cant it directly - first get codec info using the static enum that actually defines the codec
+		pjmedia_codec_mgr_get_codec_info(codec_mgr,  (unsigned int)PJMEDIA_RTP_PT_PCMA , (const pjmedia_codec_info**)&inf);
+
+		//and then use the name to look up the info again and set priority
+		pjmedia_codec_mgr_set_codec_priority(codec_mgr,&(inf->encoding_name), PJMEDIA_CODEC_PRIO_HIGHEST);
+
+		for (int i=0; i<25; i++)
 		{
 
 			pjsua_msg_data msg_data;
@@ -891,15 +1044,9 @@ int main(int argc, char** argv)
 			pj_str_t uri = pj_str((char *)uri_to_call_string.c_str());
 			callUserData->callType=eCallType::SIMULATED_AXE_CALL_OFFER;
 			pjsua_call_make_call(acc_id, &uri, 0, callUserData, &msg_data, &(callUserData->call_id));
-			callUserData->SetHangupTimer(30);
-			usleep(500000);
+			callUserData->SetHangupTimer(300);
+			usleep(1000000);
 		}
-
-		sleep(30);
-		pjsua_call_hangup_all();
-
-		return 0;
-
 	}
 
 	/* Wait until user press "q" to quit. */
@@ -918,6 +1065,105 @@ int main(int argc, char** argv)
 
 		if (option[0] == 'h')
 			pjsua_call_hangup_all();
+
+		if(option[0] == 's')
+		{
+			printf("Current active calls %d\n",ctr);
+			printf("Calls cleared with reason:\n");
+			for(auto i=0; i<statuscode_counter.size(); i++)
+			{
+				if (statuscode_counter[i] > 0 && pjsip_get_status_text2(i)!=0)
+				{
+					printf("%s %ld\n",pjsip_get_status_text2(i)->ptr,statuscode_counter[i]);
+				}
+			}
+		}
+
+		if (option[0] == 'l')
+		{
+			auto call_count = pjsua_call_get_count()+10; //reserve a little extra space, can 10 calls turn up in the meantime....
+			if (call_count>0)
+			{
+				std::vector<pjsua_call_id> calls(call_count);
+				pjsua_enum_calls(calls.data(),&call_count); //may update call count on another thread - we send in the max size and get back the real number
+				calls.resize(call_count);
+				for (auto call: calls)
+				{
+					pjsua_call_info info;
+					if(pjsua_call_get_info(call,&info) == PJ_SUCCESS) //get info on the call - but it may disappear while iterating - so not finding it is not an error
+					{
+
+						printf("ID: %d\nFrom: %.*s To: %.*s\nCallID: %.*s\nState: %.*s\nConnect Duration: %ld.%03lds Total Duration %ld.%03lds\n",
+								call,
+								(int)info.local_contact.slen,
+								info.local_contact.ptr,
+								(int)info.remote_contact.slen,
+								info.remote_contact.ptr,
+								(int)info.call_id.slen,
+								info.call_id.ptr,
+								(int)info.state_text.slen,
+								info.state_text.ptr,
+								info.connect_duration.sec,
+								info.connect_duration.msec,
+								info.total_duration.sec,
+								info.total_duration.msec);
+
+						printf("SDP: \n");
+						printf(LocalCallUserData::LookupByCall(call)->sdp_buf.data());
+
+						PJSUA_LOCK();
+
+						pjsua_call* pcall = &pjsua_var.calls[call];
+
+						if (pcall) //was it still there??
+						{
+
+
+							pjsua_call_media* call_med = &pcall->media[0];  //this breaks when there are multiple media types...
+							pjmedia_rtcp_stat rtcp_stats;
+							pjmedia_stream_get_stat(call_med->strm.a.stream,&rtcp_stats);
+							PJSUA_UNLOCK();
+
+							if (vm.count("server")>0)
+							{
+								printf ("RX stats\npkts: %d bytes: %d\ndiscarded: %d lost: %d\nreordered: %d dup: %d\njitter (us) min/mean/max %d/%d/%d\n",
+										rtcp_stats.rx.pkt,
+										rtcp_stats.rx.bytes,
+										rtcp_stats.rx.discard,
+										rtcp_stats.rx.loss,
+										rtcp_stats.rx.reorder,
+										rtcp_stats.rx.dup,
+										rtcp_stats.rx.jitter.min,
+										rtcp_stats.rx.jitter.mean,
+										rtcp_stats.rx.jitter.max);
+							}
+							else
+							{
+								printf ("TX stats\npkts: %d bytes: %d\ndiscarded: %d lost: %d\nreordered: %d dup: %d\njitter (us) min/mean/max %d/%d/%d\n",
+										rtcp_stats.tx.pkt,
+										rtcp_stats.tx.bytes,
+										rtcp_stats.tx.discard,
+										rtcp_stats.tx.loss,
+										rtcp_stats.tx.reorder,
+										rtcp_stats.tx.dup,
+										rtcp_stats.tx.jitter.min,
+										rtcp_stats.tx.jitter.mean,
+										rtcp_stats.tx.jitter.max);
+							}
+
+						}
+						else
+						{
+							PJSUA_UNLOCK();
+						}
+
+
+
+					}
+
+				}
+			}
+		}
 	}
 
 	return 0;
