@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <vector>
+#include <atomic>
 #include <pj/file_access.h>
 
 #include <boost/program_options.hpp>
@@ -136,7 +137,7 @@ PJ_DEF(pj_status_t) pjmedia_tp_adapter_create( pjmedia_endpt *endpt,
 	pj_ansi_strncpy(adapter->base.name, pool->obj_name,
 			sizeof(adapter->base.name));
 	adapter->base.type = (pjmedia_transport_type)
-																									 (PJMEDIA_TRANSPORT_TYPE_USER + 1);
+																													 (PJMEDIA_TRANSPORT_TYPE_USER + 1);
 	adapter->base.op = &tp_adapter_op;
 
 	/* Save the transport as the slave transport */
@@ -441,15 +442,17 @@ public:
 	eCallType  callType;
 	eSimulatorDirectionType simDir;
 	eAgentDirectionType agentDir;
-	pjsua_call_id call_id;
+	boost::optional<pjsua_call_id> call_id;
 	std::vector<char> sdp_buf;
+	bool confirmed;
+
 
 	std::shared_ptr<std::function<void(void)>> clearCallTimerCB;
 
 
 	LocalCallUserData():callType(eCallType::UNINITIALISED),
 			simDir(eSimulatorDirectionType::SIMULATED_UNI_DIRECTIONAL),
-			agentDir(eAgentDirectionType::ANSWER_UNI_DIRECTIONAL),call_id(-1),sdp_buf(2000,0)
+			agentDir(eAgentDirectionType::ANSWER_UNI_DIRECTIONAL),call_id(boost::none),sdp_buf(2000,0),confirmed(false)
 	{
 		pool = pjmedia_endpt_create_pool(pjsua_get_pjmedia_endpt(), "USER_CALL_%p", 512, 512);
 	}
@@ -461,18 +464,19 @@ public:
 
 	static LocalCallUserData* LookupByCall(pjsua_call_id call_id)
 	{
-		return (LocalCallUserData*)pjsua_call_get_user_data (call_id);
+		auto call = (LocalCallUserData*)pjsua_call_get_user_data (call_id);
+		return call;
 	}
 
 	void BindToCall(pjsua_call_id _call_id)
 	{
 		call_id=_call_id;
-		pjsua_call_set_user_data (call_id,this);
+		pjsua_call_set_user_data (_call_id,this);
 	}
 
 	void SaveSDP()
 	{
-		if(call_id==-1)
+		if(call_id==boost::none)
 		{
 			std::cerr << "WTF - trying to save sdp in unbound call context";
 			exit(-1);
@@ -480,7 +484,7 @@ public:
 
 		PJSUA_LOCK();
 
-		auto call = &pjsua_var.calls[call_id];
+		auto call = &pjsua_var.calls[call_id.get()];
 		pjmedia_sdp_neg* sdp_neg = call->inv->neg;
 
 		PJSUA_UNLOCK();
@@ -495,6 +499,7 @@ public:
 			sdp_buf.resize(sdp_buf.size() * 2);
 		}
 		sdp_buf.resize(sz+1);
+		confirmed=true;
 	}
 
 	static void timer_heap_callback(void *user_data)
@@ -505,17 +510,17 @@ public:
 
 	void SetHangupTimer(uint32_t sec_timeout)
 	{
-		pjsua_call_id c = call_id; //capture c by value
-		if(c==-1)
+		if(call_id==boost::none)
 		{
 			std::cerr << "WTF - trying to set timer on call object that is not initialised";
 			exit(-1);
 		}
+		pjsua_call_id c = call_id.get(); //capture c by value
 		std::function<void(void)>* lambda = new std::function<void(void)>([c](void)
 				{
-			if (c !=-1)
-				pjsua_call_hangup(c,200,0,0);
-				});
+			pjsua_call_hangup(c,200,0,0);
+				}
+		);
 		clearCallTimerCB=std::shared_ptr<std::function<void(void)>>(lambda);
 		pjsua_schedule_timer2(timer_heap_callback,this,sec_timeout*1000);
 	}
@@ -529,7 +534,7 @@ void add_SIP_I_AXE_IAM_Mime(pj_pool_t* pool, pjsua_msg_data *msg_data)
 {
 	pjsip_multipart_part *alt_part;
 	const char* content_type_string = "application";
-	const char* content_subtype_string = "ISUP; version=itu-t \nContent-Disposition: signal; handling=optional";
+	const char* content_subtype_string = "ISUP; version=itu-t92+ \nContent-Disposition: signal; handling=required";
 
 	/*this is an IAM string extracted from PCAP trace
 	ISDN User Part
@@ -616,7 +621,7 @@ void add_SIP_I_AXE_IAM_Mime(pj_pool_t* pool, pjsua_msg_data *msg_data)
 	            .... 0... = Odd/even indicator: Even number of address signals (0x0)
 	            Subaddress: 200031010010818080010001f2f1ff0080ffff11
 	    End of optional parameters (0)
-*/
+	 */
 	const uint8_t content_string[] = {
 			0x01,0x00,0x20,0x01,0xf7,0x00,0x02,0x0a,
 			0x08,0x82,0x90,0x30,0x69,0x05,0x24,0x23,
@@ -649,7 +654,7 @@ void add_SIP_I_S12_IAM_Mime(pj_pool_t* pool, pjsua_msg_data *msg_data)
 {
 	pjsip_multipart_part *alt_part;
 	const char* content_type_string = "application";
-	const char* content_subtype_string = "ISUP; version=itu-t \nContent-Disposition: signal; handling=optional";
+	const char* content_subtype_string = "ISUP; version=itu-t92+ \nContent-Disposition: signal; handling=required";
 	const char content_string[] = "THIS WAS AN S12 IAM A bunch of zeros \0\0\0\0 And after the zeros - ";
 
 	const pj_str_t content_type=pj_str((char*)content_type_string);
@@ -673,7 +678,7 @@ void add_SIP_I_CON_Mime(pj_pool_t* pool, pjsua_msg_data *msg_data)
 {
 	pjsip_multipart_part *alt_part;
 	const char* content_type_string = "application";
-	const char* content_subtype_string = "ISUP; version=itu-t \nContent-Disposition: signal; handling=optional";
+	const char* content_subtype_string = "ISUP; version=itu-t92+ \nContent-Disposition: signal; handling=required";
 	//CON + BACKWARD CALL INDICATOR BYTES
 	const char content_string[] = { 0x07, 0x06, 0x16 };
 
@@ -692,6 +697,29 @@ void add_SIP_I_CON_Mime(pj_pool_t* pool, pjsua_msg_data *msg_data)
 	pj_list_push_back(&msg_data->multipart_parts, alt_part);
 }
 
+//the CON ISUP message to append on the reply - its always the same
+void add_SIP_I_ANM_Mime(pj_pool_t* pool, pjsua_msg_data *msg_data)
+{
+	pjsip_multipart_part *alt_part;
+	const char* content_type_string = "application";
+	const char* content_subtype_string = "ISUP; version=itu-t92+ \nContent-Disposition: signal; handling=required";
+	//ANM - no optional bytes
+	const char content_string[] = { 0x09, 0x00 };
+
+	const pj_str_t content_type=pj_str((char*)content_type_string);
+	const pj_str_t content_subtype=pj_str((char*)content_subtype_string);
+	const pj_str_t content={(char*)content_string,sizeof(content_string)}; //note NOT STRLEN!!!
+
+	alt_part = pjsip_multipart_create_part(pool);
+	alt_part->body = pjsip_msg_body_create(pool, &content_type,
+			&content_subtype, &content);
+
+	pjsua_msg_data_init(msg_data);
+
+	msg_data->multipart_ctype.type = pj_str((char*)"multipart");
+	msg_data->multipart_ctype.subtype = pj_str((char*)"mixed");
+	pj_list_push_back(&msg_data->multipart_parts, alt_part);
+}
 
 /*
  * This callback is called when media transport needs to be created.
@@ -749,7 +777,8 @@ static void on_incoming_call(pjsua_acc_id acc_id, pjsua_call_id call_id,
 	pjsua_msg_data msg_data;
 
 	//NOTE THAT USER DATA IS ALREADY ALLOCATED in on_call_sdp_created
-	add_SIP_I_CON_Mime(LocalCallUserData::LookupByCall(call_id)->pool,&msg_data);
+	//	add_SIP_I_CON_Mime(LocalCallUserData::LookupByCall(call_id)->pool,&msg_data);
+	add_SIP_I_ANM_Mime(LocalCallUserData::LookupByCall(call_id)->pool,&msg_data);
 
 	/* Automatically answer incoming calls with 200/OK */
 	pjsua_call_answer(call_id, 200, NULL, &msg_data);
@@ -757,7 +786,7 @@ static void on_incoming_call(pjsua_acc_id acc_id, pjsua_call_id call_id,
 
 static std::vector<uint64_t> statuscode_counter(1000,0);
 
-static int ctr(0);
+static std::atomic<int> ctr(0); //number of calls in the system - assume this can be atomically incremented in multithread context
 
 
 /* Callback called by the library when call's state has changed */
@@ -767,23 +796,31 @@ static void on_call_state(pjsua_call_id call_id, pjsip_event *e)
 
 	PJ_UNUSED_ARG(e);
 
-	pjsip_status_code sc;
 
 	pjsua_call_get_info(call_id, &ci);
 	PJ_LOG(3,(THIS_FILE, "Call %d state=%.*s", call_id,
 			(int)ci.state_text.slen,
 			ci.state_text.ptr));
+	LocalCallUserData* call;
+
 	switch (ci.state)
 	{
+	case  PJSIP_INV_STATE_CALLING :
+	case  PJSIP_INV_STATE_INCOMING :
+		break;
 	case PJSIP_INV_STATE_CONFIRMED :
 		LocalCallUserData::LookupByCall(call_id)->SaveSDP();
-		ctr++;
+		++ctr;
 		break;
 	case PJSIP_INV_STATE_DISCONNECTED :
+	{
+		call = LocalCallUserData::LookupByCall(call_id);
+		if(call && call->confirmed)
+			ctr--;
 		statuscode_counter[ci.last_status]++;
-		delete LocalCallUserData::LookupByCall(call_id);
-		ctr--;
+		delete call;
 		break;
+	}
 	default:
 		break;
 
@@ -794,11 +831,9 @@ static void on_call_state(pjsua_call_id call_id, pjsip_event *e)
 static void on_call_media_state(pjsua_call_id call_id)
 {
 	pjsua_call_info ci;
-	pjsua_stream_info si;
 
 	pjsua_call *call;
 	pjsua_call_media *call_med;
-	pj_status_t status;
 
 
 	unsigned med_idx=0;
@@ -904,14 +939,16 @@ int main(int argc, char** argv)
 	unsigned short port;
 
 	std::string uri_to_call_string;
+	int log_level;
 
 	po::options_description desc;
 	desc.add_options()
-	    																																										  ("help,h", "Help screen")
-																																												  ("port,p",po::value(&port)->default_value(5060),"sip port to listen on")
-																																												  ("server", "activate server thread")
-																																												  ("client", po::value(&uri_to_call_string)->default_value(std::string("sip:127.0.0.1")),"activate client thread")
-																																												  ;
+				("help,h", "Help screen")
+				("port,p",po::value(&port)->default_value(5060),"sip port to listen on")
+				("server", "activate server thread")
+				("client", po::value(&uri_to_call_string)->default_value(std::string("sip:+12345@127.0.0.1;user=phone")),"activate client thread")
+				("loglevel,l", po::value(&log_level)->default_value(2),"log level to be used from 1 to 5")
+				;
 
 
 	po::variables_map vm;
@@ -947,10 +984,6 @@ int main(int argc, char** argv)
 
 	pjsua_acc_id acc_id;
 
-	{
-		//initialise realtime subsystem
-
-	}
 
 	/* Create pjsua first! */
 	pjsua_create();
@@ -975,13 +1008,20 @@ int main(int argc, char** argv)
 		ua_cfg.max_calls = 1200;
 		ua_cfg.thread_cnt=2;
 
-		log_cfg.console_level = 2;
+		log_cfg.console_level = log_level;
 
 		media_cfg.no_vad = 1; //disable VAD
 		if (vm.count("server")==0)
+		{
 			media_cfg.thread_cnt=2;
+			ua_cfg.require_100rel=PJSUA_100REL_MANDATORY; //we will force 100 TRYING to be generated - this is really for testing purposes
+			//or you can set this to PJSUA_100REL_NOT_USED - to not generate 100 TRYING
+		}
 		else
+		{
 			media_cfg.thread_cnt=16;
+			ua_cfg.require_100rel=PJSUA_100REL_OPTIONAL; //if we a server support 100 TRYING if the client wants it
+		}
 
 		pjsua_init(&ua_cfg, &log_cfg, &media_cfg);
 	}
@@ -1037,13 +1077,15 @@ int main(int argc, char** argv)
 		{
 
 			pjsua_msg_data msg_data;
-			pjsua_call_id call_id;
 
 			LocalCallUserData* callUserData = new LocalCallUserData;
 			add_SIP_I_AXE_IAM_Mime(callUserData->pool,&msg_data);
 			pj_str_t uri = pj_str((char *)uri_to_call_string.c_str());
 			callUserData->callType=eCallType::SIMULATED_AXE_CALL_OFFER;
-			pjsua_call_make_call(acc_id, &uri, 0, callUserData, &msg_data, &(callUserData->call_id));
+			callUserData->call_id=-1; //we have to force the callid to soething AS WE ARE MAKING THE CALL - otherwise optional will barf
+			//I have no idea when the C interface populates the call_id - but it is prior to return, so we need
+			//the optional block to be allocated if not actually populated...
+			pjsua_call_make_call(acc_id, &uri, 0, callUserData, &msg_data, &(*(callUserData->call_id)));
 			callUserData->SetHangupTimer(300);
 			usleep(1000000);
 		}
@@ -1068,9 +1110,9 @@ int main(int argc, char** argv)
 
 		if(option[0] == 's')
 		{
-			printf("Current active calls %d\n",ctr);
+			printf("Current active calls %d\n",int(ctr));
 			printf("Calls cleared with reason:\n");
-			for(auto i=0; i<statuscode_counter.size(); i++)
+			for(size_t i=0; i<statuscode_counter.size(); i++)
 			{
 				if (statuscode_counter[i] > 0 && pjsip_get_status_text2(i)!=0)
 				{
@@ -1093,12 +1135,12 @@ int main(int argc, char** argv)
 					if(pjsua_call_get_info(call,&info) == PJ_SUCCESS) //get info on the call - but it may disappear while iterating - so not finding it is not an error
 					{
 
-						printf("ID: %d\nFrom: %.*s To: %.*s\nCallID: %.*s\nState: %.*s\nConnect Duration: %ld.%03lds Total Duration %ld.%03lds\n",
+						printf("ID: %d\nLocal URI: %.*s Remote URI: %.*s\nCallID: %.*s\nState: %.*s\nConnect Duration: %ld.%03lds Total Duration %ld.%03lds\n",
 								call,
-								(int)info.local_contact.slen,
-								info.local_contact.ptr,
-								(int)info.remote_contact.slen,
-								info.remote_contact.ptr,
+								(int)info.local_info.slen,
+								info.local_info.ptr,
+								(int)info.remote_info.slen,
+								info.remote_info.ptr,
 								(int)info.call_id.slen,
 								info.call_id.ptr,
 								(int)info.state_text.slen,
