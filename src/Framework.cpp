@@ -1073,7 +1073,7 @@ int main(int argc, char** argv)
 		//and then use the name to look up the info again and set priority
 		pjmedia_codec_mgr_set_codec_priority(codec_mgr,&(inf->encoding_name), PJMEDIA_CODEC_PRIO_HIGHEST);
 
-		for (int i=0; i<25; i++)
+		for (int i=0; i<150; i++)
 		{
 
 			pjsua_msg_data msg_data;
@@ -1087,7 +1087,7 @@ int main(int argc, char** argv)
 			//the optional block to be allocated if not actually populated...
 			pjsua_call_make_call(acc_id, &uri, 0, callUserData, &msg_data, &(*(callUserData->call_id)));
 			callUserData->SetHangupTimer(300);
-			usleep(1000000);
+			usleep(500000);
 		}
 	}
 
